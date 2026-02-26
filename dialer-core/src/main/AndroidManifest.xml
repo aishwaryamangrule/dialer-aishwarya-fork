@@ -16,6 +16,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- OEM compatibility for write-call-log on older devices -->
     <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS"
@@ -64,9 +65,9 @@
             android:exported="true"
             android:foregroundServiceType="phoneCall">
             <!-- Advertise that this service plays ringtones for incoming calls -->
-            <meta-data
-                android:name="android.telecom.IN_CALL_SERVICE_RINGING"
-                android:value="true" />
+<!--            <meta-data-->
+<!--                android:name="android.telecom.IN_CALL_SERVICE_RINGING"-->
+<!--                android:value="false" />-->
             <!-- Advertise basic in-call UI capability (Android 12+) -->
             <meta-data
                 android:name="android.telecom.IN_CALL_SERVICE_UI"
