@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.ContactsContract
 import android.telecom.PhoneAccountHandle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -60,10 +61,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import com.fayyaztech.dialer_core.services.CarrierFeatureHelper
+import com.fayyaztech.dialer_core.services.SimPreferenceHelper
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
 import com.fayyaztech.dialer_core.services.SpeedDialHelper
 import com.fayyaztech.dialer_core.services.T9Contact
 import com.fayyaztech.dialer_core.services.T9SearchHelper
+import com.fayyaztech.dialer_core.services.UssdHelper
 import com.fayyaztech.dialer_core.ui.contacts.ContactDetailActivity
 import com.fayyaztech.dialer_core.ui.contacts.ContactsActivity
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
@@ -96,6 +100,7 @@ class DialerActivity : ComponentActivity() {
         private const val TAG = "DialerActivity"
         private const val T9_DEBOUNCE_MS     = 300L
         private const val REQ_CALL_PERMISSION = 101
+        const val EXTRA_AUTO_PLACE_CALL = "EXTRA_AUTO_PLACE_CALL"
     }
 
     // ── UI state (MutableState so Compose recomposes on change) ──────────────
@@ -112,6 +117,17 @@ class DialerActivity : ComponentActivity() {
     // SIM picker dialog
     private var showSimPicker by mutableStateOf(false)
     private var pendingNumber by mutableStateOf("")
+
+    // Roaming warning dialog — shown before placing a call on a roaming SIM
+    private var showRoamingWarning by mutableStateOf(false)
+    private var pendingHandle      by mutableStateOf<PhoneAccountHandle?>(null)
+
+    // USSD result dialog — shown when a USSD response arrives from the carrier
+    private var showUssdResult by mutableStateOf(false)
+    private var ussdResultText by mutableStateOf("")
+
+    // Carrier feature-code suggestions shown in place of T9 results when input starts with * or #
+    private var featureSuggestions by mutableStateOf<List<CarrierFeatureHelper.FeatureCode>>(emptyList())
 
     private var searchJob: Job? = null
 
@@ -160,14 +176,49 @@ class DialerActivity : ComponentActivity() {
                         // SIM picker
                         showSimPicker       = showSimPicker,
                         simList             = simList,
-                        onSimSelected       = { handle ->
+                        onSimSelected       = { simInfo ->
                             showSimPicker = false
-                            SimSelectionHelper.placeCall(this, pendingNumber, handle)
+                            // After picking, re-check USSD vs regular call
+                            if (UssdHelper.isUssdCode(pendingNumber)) {
+                                UssdHelper.sendUssdCode(
+                                    context        = this,
+                                    code           = pendingNumber,
+                                    subscriptionId = simInfo.subscriptionId,
+                                    onResult       = { r -> ussdResultText = r; showUssdResult = true },
+                                    onError        = { e -> ussdResultText = "Error: $e"; showUssdResult = true },
+                                )
+                            } else {
+                                placeCallWithRoamingCheck(pendingNumber, simInfo)
+                            }
                         },
                         onSimPickerDismiss  = { showSimPicker = false },
+                        onSetSimDefault     = { simInfo ->
+                            SimPreferenceHelper.setDefaultSimSubId(this, simInfo.subscriptionId)
+                        },
+                        onAskEachTime       = {
+                            SimPreferenceHelper.clearDefaultSim(this)
+                        },
+                        // Roaming warning
+                        showRoamingWarning  = showRoamingWarning,
+                        onRoamingProceed    = {
+                            showRoamingWarning = false
+                            SimSelectionHelper.placeCall(this, pendingNumber, pendingHandle)
+                        },
+                        onRoamingDismiss    = { showRoamingWarning = false },
+                        // USSD result
+                        showUssdResult      = showUssdResult,
+                        ussdResultText      = ussdResultText,
+                        onUssdDismiss       = { showUssdResult = false },
+                        // Carrier feature-code suggestions
+                        featureSuggestions  = featureSuggestions,
+                        onFeatureCodeCall   = { code -> initiateCall(code) },
                     )
                 }
             }
+        }
+
+        if (shouldAutoPlaceCall(intent) && dialedNumber.isNotBlank()) {
+            initiateCall(dialedNumber)
         }
     }
 
@@ -179,6 +230,9 @@ class DialerActivity : ComponentActivity() {
             dialedNumber = n
             scheduleT9Search(n)
         }
+        if (shouldAutoPlaceCall(intent) && n.isNotBlank()) {
+            initiateCall(n)
+        }
     }
 
     // ── Digit input ───────────────────────────────────────────────────────────
@@ -186,18 +240,21 @@ class DialerActivity : ComponentActivity() {
     private fun onDigit(digit: Char) {
         dialedNumber += digit
         scheduleT9Search(dialedNumber)
+        featureSuggestions = CarrierFeatureHelper.getSuggestions(dialedNumber)
     }
 
     private fun onBackspace() {
         if (dialedNumber.isNotEmpty()) {
             dialedNumber = dialedNumber.dropLast(1)
             scheduleT9Search(dialedNumber)
+            featureSuggestions = CarrierFeatureHelper.getSuggestions(dialedNumber)
         }
     }
 
     private fun clearAll() {
-        dialedNumber  = ""
-        searchResults = emptyList()
+        dialedNumber       = ""
+        searchResults      = emptyList()
+        featureSuggestions = emptyList()
         searchJob?.cancel()
     }
 
@@ -209,8 +266,9 @@ class DialerActivity : ComponentActivity() {
             // Keep only characters valid in a dialable number
             val dialable = raw.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
             if (dialable.isEmpty()) return
-            dialedNumber = dialable
+            dialedNumber       = dialable
             scheduleT9Search(dialable)
+            featureSuggestions = CarrierFeatureHelper.getSuggestions(dialable)
             Log.d(TAG, "Pasted: $dialable")
         } catch (e: Exception) {
             Log.w(TAG, "Paste failed: ${e.message}")
@@ -242,6 +300,13 @@ class DialerActivity : ComponentActivity() {
 
     private fun initiateCall(number: String) {
         if (number.isBlank()) return
+
+        // ── USSD detection ────────────────────────────────────────────────────
+        if (UssdHelper.isUssdCode(number)) {
+            handleUssdCode(number)
+            return
+        }
+
         if (!hasCallPermission()) {
             pendingNumber = number
             ActivityCompat.requestPermissions(
@@ -249,16 +314,123 @@ class DialerActivity : ComponentActivity() {
             )
             return
         }
+
         // Refresh SIM list right before placing the call
         simList = SimSelectionHelper.getAvailableSims(this)
         when {
-            simList.size > 1 -> {
-                // Multiple SIMs — let the user pick
-                pendingNumber = number
-                showSimPicker = true
+            simList.isEmpty() -> placeCallFallback(number)
+            simList.size == 1 -> placeCallWithRoamingCheck(number, simList[0])
+            else              -> resolveSimAndCall(number)
+        }
+    }
+
+    /**
+     * Resolution order for multi-SIM:
+     *  1. Per-contact SIM preference (requires background I/O to look up contact)
+     *  2. User default SIM (when ask-each-time is disabled)
+     *  3. Show SIM picker
+     */
+    private fun resolveSimAndCall(number: String) {
+        lifecycleScope.launch {
+            // 1. Per-contact SIM preference
+            val contactId = withContext(Dispatchers.IO) { lookupContactId(number) }
+            if (contactId != null) {
+                val preferredSubId = SimPreferenceHelper.getContactSimSubId(this@DialerActivity, contactId)
+                val preferred = simList.find { it.subscriptionId == preferredSubId }
+                if (preferred != null) {
+                    placeCallWithRoamingCheck(number, preferred)
+                    return@launch
+                }
             }
-            simList.size == 1 -> SimSelectionHelper.placeCall(this, number, simList[0].phoneAccountHandle)
-            else              -> placeCallFallback(number)
+
+            // 2. User default SIM (ask-each-time disabled)
+            if (!SimPreferenceHelper.isAskEachTime(this@DialerActivity)) {
+                val defaultSubId = SimPreferenceHelper.getDefaultSimSubId(this@DialerActivity)
+                val defaultSim   = simList.find { it.subscriptionId == defaultSubId }
+                    ?: run {
+                        // Fall back to system-level default if the stored sub ID isn't in the list
+                        val systemHandle = SimSelectionHelper.getDefaultOutgoingSimHandle(this@DialerActivity)
+                        simList.find { it.phoneAccountHandle == systemHandle }
+                    }
+                if (defaultSim != null) {
+                    placeCallWithRoamingCheck(number, defaultSim)
+                    return@launch
+                }
+            }
+
+            // 3. Show SIM picker
+            pendingNumber = number
+            showSimPicker = true
+        }
+    }
+
+    /**
+     * Checks whether the SIM is roaming before placing the call.
+     * If roaming, stores the target number + handle and shows [showRoamingWarning].
+     */
+    private fun placeCallWithRoamingCheck(number: String, sim: SimSelectionHelper.SimInfo) {
+        if (SimSelectionHelper.isRoaming(this, sim.subscriptionId)) {
+            pendingNumber = number
+            pendingHandle = sim.phoneAccountHandle
+            showRoamingWarning = true
+        } else {
+            SimSelectionHelper.placeCall(this, number, sim.phoneAccountHandle)
+        }
+    }
+
+    /**
+     * Sends a USSD code on the appropriate SIM.
+     * If multi-SIM and no default is set, reuses the SIM picker.
+     */
+    private fun handleUssdCode(code: String) {
+        if (!hasCallPermission()) {
+            pendingNumber = code
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CALL_PHONE), REQ_CALL_PERMISSION,
+            )
+            return
+        }
+        simList = SimSelectionHelper.getAvailableSims(this)
+        val subscriptionId = when {
+            simList.isEmpty() -> -1
+            simList.size == 1 -> simList[0].subscriptionId
+            !SimPreferenceHelper.isAskEachTime(this) -> SimPreferenceHelper.getDefaultSimSubId(this)
+            else -> {
+                // Need a SIM selection — reuse the picker, then send after selection
+                pendingNumber = code
+                showSimPicker = true
+                return
+            }
+        }
+        UssdHelper.sendUssdCode(
+            context        = this,
+            code           = code,
+            subscriptionId = subscriptionId,
+            onResult       = { response -> ussdResultText = response; showUssdResult = true },
+            onError        = { msg      -> ussdResultText = "Error: $msg"; showUssdResult = true },
+        )
+    }
+
+    /**
+     * Looks up the Android contacts-provider contact ID for [number] using
+     * [ContactsContract.PhoneLookup]. Must be called from a background thread.
+     */
+    private fun lookupContactId(number: String): Long? {
+        val uri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(number),
+        )
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.PhoneLookup.CONTACT_ID),
+                null, null, null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0) else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "lookupContactId failed for '$number': ${e.message}")
+            null
         }
     }
 
@@ -335,6 +507,12 @@ class DialerActivity : ComponentActivity() {
         }
         return intent.getStringExtra("PHONE_NUMBER")
     }
+
+    /** Returns true when this intent requests immediate call placement for its number payload. */
+    private fun shouldAutoPlaceCall(intent: Intent?): Boolean {
+        intent ?: return false
+        return intent.getBooleanExtra(EXTRA_AUTO_PLACE_CALL, false)
+    }
 }
 
 // =============================================================================
@@ -382,8 +560,21 @@ internal fun DialerScreen(
     // SIM picker
     showSimPicker: Boolean,
     simList: List<SimSelectionHelper.SimInfo>,
-    onSimSelected: (PhoneAccountHandle?) -> Unit,
+    onSimSelected: (SimSelectionHelper.SimInfo) -> Unit,
     onSimPickerDismiss: () -> Unit,
+    onSetSimDefault: (SimSelectionHelper.SimInfo) -> Unit,
+    onAskEachTime: () -> Unit,
+    // Roaming warning
+    showRoamingWarning: Boolean,
+    onRoamingProceed: () -> Unit,
+    onRoamingDismiss: () -> Unit,
+    // USSD result
+    showUssdResult: Boolean,
+    ussdResultText: String,
+    onUssdDismiss: () -> Unit,
+    // Carrier feature-code suggestions
+    featureSuggestions: List<CarrierFeatureHelper.FeatureCode>,
+    onFeatureCodeCall: (String) -> Unit,
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -419,8 +610,19 @@ internal fun DialerScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            // 2 ── T9 search results (visible while digits are typed and results exist)
-            if (searchResults.isNotEmpty() || isSearching) {
+            // 2 ── Carrier feature-code suggestions (shown when input starts with * or #)
+            if (featureSuggestions.isNotEmpty()) {
+                FeatureCodeList(
+                    suggestions  = featureSuggestions,
+                    onCall       = onFeatureCodeCall,
+                    modifier     = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp),
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            // 2b ── T9 contact results (only shown when no feature suggestions are present)
+            else if (searchResults.isNotEmpty() || isSearching) {
                 T9ResultsList(
                     results        = searchResults,
                     isSearching    = isSearching,
@@ -476,9 +678,25 @@ internal fun DialerScreen(
 
         if (showSimPicker && simList.size > 1) {
             SimPickerDialog(
-                simList   = simList,
-                onSelect  = onSimSelected,
-                onDismiss = onSimPickerDismiss,
+                simList        = simList,
+                onSelect       = onSimSelected,
+                onSetDefault   = onSetSimDefault,
+                onAskEachTime  = onAskEachTime,
+                onDismiss      = onSimPickerDismiss,
+            )
+        }
+
+        if (showRoamingWarning) {
+            RoamingWarningDialog(
+                onProceed = onRoamingProceed,
+                onDismiss = onRoamingDismiss,
+            )
+        }
+
+        if (showUssdResult) {
+            UssdResultDialog(
+                resultText = ussdResultText,
+                onDismiss  = onUssdDismiss,
             )
         }
     }
@@ -820,13 +1038,16 @@ private fun SpeedDialDialog(
 }
 
 // =============================================================================
+// =============================================================================
 // SimPickerDialog — shown when the device has more than one active SIM
 // =============================================================================
 
 @Composable
 private fun SimPickerDialog(
     simList: List<SimSelectionHelper.SimInfo>,
-    onSelect: (PhoneAccountHandle?) -> Unit,
+    onSelect: (SimSelectionHelper.SimInfo) -> Unit,
+    onSetDefault: (SimSelectionHelper.SimInfo) -> Unit,
+    onAskEachTime: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -837,35 +1058,64 @@ private fun SimPickerDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        onAskEachTime()
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "Ask every time",
+                        color = AccentBlue,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
                 simList.forEach { sim ->
-                    Row(
-                        modifier              = Modifier
+                    Column(
+                        modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(BgButton)
-                            .clickable { onSelect(sim.phoneAccountHandle) }
                             .padding(12.dp),
-                        verticalAlignment     = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Text(
-                            text       = "SIM ${sim.slotIndex + 1}",
-                            color      = AccentBlue,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Column {
+                        Row(
+                            modifier              = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(sim) },
+                            verticalAlignment     = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
                             Text(
-                                sim.displayName,
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium,
+                                text       = "SIM ${sim.slotIndex + 1}",
+                                color      = AccentBlue,
+                                fontWeight = FontWeight.Bold,
                             )
-                            if (sim.phoneNumber.isNotBlank()) {
+                            Column(Modifier.weight(1f)) {
                                 Text(
-                                    sim.phoneNumber,
-                                    color = TextSub,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    sim.displayName,
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.bodyMedium,
                                 )
+                                if (sim.phoneNumber.isNotBlank()) {
+                                    Text(
+                                        sim.phoneNumber,
+                                        color = TextSub,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
                             }
+                        }
+                        TextButton(
+                            onClick  = { onSetDefault(sim); onDismiss() },
+                            modifier = Modifier.align(Alignment.End),
+                        ) {
+                            Text(
+                                text  = "Always use this SIM",
+                                color = AccentBlue,
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
                     }
                 }
@@ -878,4 +1128,130 @@ private fun SimPickerDialog(
             }
         },
     )
+}
+
+// =============================================================================
+// RoamingWarningDialog — shown before placing a call while the SIM is roaming
+// =============================================================================
+
+@Composable
+private fun RoamingWarningDialog(
+    onProceed: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor   = BgSurface,
+        title = {
+            Text("Roaming Warning", color = Color.White, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Text(
+                "Your device is currently roaming. This call may incur additional charges from your carrier.",
+                color = TextSub,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onProceed) {
+                Text("Call anyway", color = AccentGreen)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSub)
+            }
+        },
+    )
+}
+
+// =============================================================================
+// UssdResultDialog — displays the carrier's USSD response text
+// =============================================================================
+
+@Composable
+private fun UssdResultDialog(
+    resultText: String,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor   = BgSurface,
+        title = {
+            Text("USSD Response", color = Color.White, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Text(
+                text  = resultText,
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK", color = AccentBlue)
+            }
+        },
+    )
+}
+
+// =============================================================================
+// FeatureCodeList — carrier feature-code suggestions
+// =============================================================================
+
+@Composable
+private fun FeatureCodeList(
+    suggestions: List<CarrierFeatureHelper.FeatureCode>,
+    onCall: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier            = modifier,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        items(suggestions, key = { it.code }) { suggestion ->
+            Row(
+                modifier              = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(BgSurface)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text       = suggestion.label,
+                        color      = Color.White,
+                        fontWeight = FontWeight.Medium,
+                        style      = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text  = suggestion.description,
+                        color = TextSub,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text(
+                    text       = suggestion.code,
+                    color      = AccentBlue,
+                    fontWeight = FontWeight.Bold,
+                    style      = MaterialTheme.typography.bodySmall,
+                )
+                Box(
+                    modifier         = Modifier
+                        .size(36.dp)
+                        .clickable { onCall(suggestion.code) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector        = Icons.Default.Call,
+                        contentDescription = "Send ${suggestion.code}",
+                        tint               = AccentGreen,
+                        modifier           = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+    }
 }

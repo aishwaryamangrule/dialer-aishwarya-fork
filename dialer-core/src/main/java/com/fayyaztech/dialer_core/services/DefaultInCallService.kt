@@ -26,7 +26,10 @@ import androidx.core.app.NotificationCompat
 import com.fayyaztech.dialer_core.ui.call.CallScreenActivity
 import com.fayyaztech.dialer_core.ui.calllog.CallLogActivity
 import com.fayyaztech.dialer_core.ui.calllog.EXTRA_FILTER_TYPE
+import com.fayyaztech.dialer_core.ui.dialer.DialerActivity
 import com.fayyaztech.dialer_core.callbacks.CallStateListener
+import com.fayyaztech.dialer_core.services.IncomingCallPreferences
+import com.fayyaztech.dialer_core.services.RingtoneHelper
 
 /**
  * In-call service implementation used by Telecom for presenting in-call UI and for controlling call
@@ -479,6 +482,7 @@ class DefaultInCallService : InCallService() {
                         }
                         Call.STATE_ACTIVE -> {
                             Log.d(TAG, "Call State: ACTIVE")
+                            RingtoneHelper.stopRinging()
                             updateCallScreen(call, "Active")
                             // Notify callback listener that call was answered
                             invokeCallAnswered(call)
@@ -568,6 +572,12 @@ class DefaultInCallService : InCallService() {
             Log.w(TAG, "onCallAdded: EMERGENCY CALL detected — bypassing screening")
         }
 
+        // Start playing the appropriate ringtone when the call is ringing
+        if (call?.state == Call.STATE_RINGING) {
+            val phoneNum = call.details?.handle?.schemeSpecificPart ?: ""
+            RingtoneHelper.startRinging(this, phoneNum, currentCallSimId)
+        }
+
         // Launch call screen for new calls if it's not already showing or if it's incoming
         if (call?.state == Call.STATE_RINGING) {
             launchCallScreen(call, if (isEmergency) "Emergency Call" else "Incoming call...")
@@ -580,6 +590,7 @@ class DefaultInCallService : InCallService() {
         super.onCallRemoved(call)
         Log.d(TAG, "onCallRemoved")
         call?.unregisterCallback(callCallback)
+        RingtoneHelper.stopRinging()
         if (currentCall == call) {
             currentCall = getAllCalls().firstOrNull()
         }
@@ -656,16 +667,18 @@ class DefaultInCallService : InCallService() {
         val caller = Person.Builder().setName(contactName).build()
 
         val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Notification.Builder(this, "call_channel")
+            val builder = Notification.Builder(this, "call_channel")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
                 .setStyle(Notification.CallStyle.forIncomingCall(caller, rejectPendingIntent, acceptPendingIntent))
-                .setFullScreenIntent(fullScreenPendingIntent, true)
                 .setOngoing(true)
                 .setCategory(Notification.CATEGORY_CALL)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .build()
+            if (IncomingCallPreferences.isFullScreen(this)) {
+                builder.setFullScreenIntent(fullScreenPendingIntent, true)
+            }
+            builder.build()
         } else {
-            NotificationCompat.Builder(this, "call_channel")
+            val builder = NotificationCompat.Builder(this, "call_channel")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
                 .setContentTitle("Incoming Call")
                 .setContentText(contactName)
@@ -673,9 +686,11 @@ class DefaultInCallService : InCallService() {
                 .addAction(android.R.drawable.ic_menu_call, "Accept", acceptPendingIntent)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setFullScreenIntent(fullScreenPendingIntent, true)
                 .setOngoing(true)
-                .build()
+            if (IncomingCallPreferences.isFullScreen(this)) {
+                builder.setFullScreenIntent(fullScreenPendingIntent, true)
+            }
+            builder.build()
         }
 
         startForeground(1, notification, getForegroundServiceTypeCompat())
@@ -781,7 +796,9 @@ class DefaultInCallService : InCallService() {
 
         // "Call Back" action
         val callBackIntent = Intent(Intent.ACTION_CALL).apply {
-            data = android.net.Uri.parse("tel:$phoneNumber")
+            setClass(this@DefaultInCallService, DialerActivity::class.java)
+            putExtra("PHONE_NUMBER", phoneNumber)
+            putExtra(DialerActivity.EXTRA_AUTO_PLACE_CALL, true)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val callBackPendingIntent = PendingIntent.getActivity(

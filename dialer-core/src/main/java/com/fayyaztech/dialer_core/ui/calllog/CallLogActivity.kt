@@ -88,6 +88,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.fayyaztech.dialer_core.ui.dialer.DialerActivity
 import com.fayyaztech.dialer_core.services.CallLogEntry
 import com.fayyaztech.dialer_core.services.CallLogFilter
 import com.fayyaztech.dialer_core.services.CallLogHelper
@@ -664,7 +665,9 @@ private fun EntryActionSheet(
             label     = "Call Back",
             onClick   = {
                 onDismiss()
-                val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${entry.phoneNumber}")).apply {
+                val intent = Intent(context, DialerActivity::class.java).apply {
+                    putExtra("PHONE_NUMBER", entry.phoneNumber)
+                    putExtra(DialerActivity.EXTRA_AUTO_PLACE_CALL, true)
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(intent)

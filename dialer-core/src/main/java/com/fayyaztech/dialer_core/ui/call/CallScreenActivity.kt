@@ -70,7 +70,12 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import com.fayyaztech.dialer_core.services.DefaultInCallService
+import com.fayyaztech.dialer_core.services.FlipToSilenceHelper
 import com.fayyaztech.dialer_core.services.ImsStatusHelper
+import com.fayyaztech.dialer_core.services.IncomingCallPreferences
+import com.fayyaztech.dialer_core.services.RejectSmsHelper
+import com.fayyaztech.dialer_core.services.ReminderHelper
+import com.fayyaztech.dialer_core.services.RingtoneHelper
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
 import com.fayyaztech.dialer_core.services.TtyHelper
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
@@ -101,6 +106,19 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.width
 import androidx.compose.animation.with
 import androidx.compose.animation.ExperimentalAnimationApi
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Message
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import com.fayyaztech.dialer_core.services.CallNoteHelper
+import com.fayyaztech.dialer_core.ui.contacts.ContactDetailActivity
 
 @OptIn(ExperimentalAnimationApi::class)
 class CallScreenActivity : ComponentActivity() {
@@ -120,6 +138,15 @@ class CallScreenActivity : ComponentActivity() {
     private val snackbarHostState = mutableStateOf(androidx.compose.material3.SnackbarHostState())
     private var isReceiverRegistered = false
     private val allCallsState = mutableStateOf<List<Call>>(emptyList())
+
+    // Flip-to-silence helper (accelerometer-based)
+    private val flipHelper by lazy { FlipToSilenceHelper(this) }
+    // Whether the ringer has been silenced by flipping the phone
+    private var ringerSilenced by mutableStateOf(false)
+    // Whether to show the reject-with-SMS bottom sheet
+    private var showRejectSmsSheet by mutableStateOf(false)
+    // Whether to show the remind-later bottom sheet
+    private var showReminderSheet by mutableStateOf(false)
 
     // TTY mode state — driven by TtyHelper / DefaultInCallService
     private val ttyModeState = mutableStateOf(TtyHelper.TTY_MODE_OFF)
@@ -190,7 +217,9 @@ class CallScreenActivity : ComponentActivity() {
         // Acquire proximity wake lock by default for earpiece mode (unless speaker is already on)
         // This ensures screen turns off when phone is near face during calls
         if (callStateState.value.contains("Active", ignoreCase = true) ||
-                        callStateState.value.contains("Dialing", ignoreCase = true)
+                        callStateState.value.contains("Dialing", ignoreCase = true) ||
+                        callStateState.value.contains("Incoming", ignoreCase = true) ||
+                        callStateState.value.contains("Ringing", ignoreCase = true)
         ) {
             acquireProximityWakeLock()
         }
@@ -220,6 +249,17 @@ class CallScreenActivity : ComponentActivity() {
                             callCount = callCountState.value,
                             onAnswerCall = { answerCall() },
                             onRejectCall = { rejectCall() },
+                            onRejectWithSms = { smsText -> rejectCall(smsText) },
+                            onRemindLater = { delayMs ->
+                                rejectCall()
+                                ReminderHelper.schedule(
+                                    this@CallScreenActivity,
+                                    phoneNumberState.value,
+                                    getContactName(phoneNumberState.value) ?: phoneNumberState.value,
+                                    delayMs
+                                )
+                            },
+                            ringerSilenced = ringerSilenced,
                             onEndCall = { endCall() },
                             onToggleMute = { toggleMute() },
                             onSetAudioRoute = { route -> setAudioRoute(route) },
@@ -231,11 +271,25 @@ class CallScreenActivity : ComponentActivity() {
                              onSwapCalls = { onSwapCalls() },
                              onSwapToCall = { targetCall -> onSwapToCall(targetCall) },
                              allCalls = allCallsState.value,
-                             onAddCall = { onAddCall() },
+                            onAddCall = { onAddCall() },
                              onSendDtmf = { digit -> sendDtmf(digit) },
                              showKeypad = showKeypad,
                              onToggleKeypad = { showKeypad = !showKeypad },
                              getContactName = { number -> getContactName(number) },
+                             onViewContact = { number ->
+                                 val contactId = getContactIdForNumber(number)
+                                 if (contactId != null) {
+                                     val intent = Intent(
+                                         this@CallScreenActivity,
+                                         ContactDetailActivity::class.java
+                                     ).apply {
+                                         putExtra(ContactDetailActivity.EXTRA_CONTACT_ID, contactId)
+                                     }
+                                     startActivity(intent)
+                                 } else {
+                                     showSnackbar("No contact found for $number")
+                                 }
+                             },
                              snackbarHostState = snackbarHostState.value,
                              ttyMode = ttyModeState.value,
                              onSetTtyMode = { mode -> setTtyMode(mode) },
@@ -490,6 +544,12 @@ class CallScreenActivity : ComponentActivity() {
                             isOnHoldState.value = false
                             updateCallCount()
                         }
+                        Call.STATE_RINGING -> {
+                            // Pocket mode: also acquire proximity lock for ringing state
+                            if (IncomingCallPreferences.isPocketModeEnabled(this@CallScreenActivity)) {
+                                acquireProximityWakeLock()
+                            }
+                        }
                         Call.STATE_HOLDING -> {
                             isOnHoldState.value = true
                             updateCallCount()
@@ -537,8 +597,11 @@ class CallScreenActivity : ComponentActivity() {
         }
     }
 
-    private fun rejectCall() {
+    private fun rejectCall(smsText: String? = null) {
         if (isEndingCall || isFinishing) return
+
+        flipHelper.unregister()
+        RingtoneHelper.stopRinging()
         
         // If there are other calls, don't finish yet
         val otherCalls = DefaultInCallService.getAllCalls().filter { 
@@ -547,14 +610,12 @@ class CallScreenActivity : ComponentActivity() {
         
         Log.d("CallScreenActivity", "Rejecting call. Other calls: ${otherCalls.size}")
         
-        Log.d("CallScreenActivity", "Attempting to reject call")
-        
         var rejected = false
-        // Try to reject the call
+        // Try to reject the call with optional SMS
         try {
             currentCall?.let {
-                it.reject(false, null)
-                Log.d("CallScreenActivity", "Call.reject() called")
+                it.reject(smsText != null, smsText)
+                Log.d("CallScreenActivity", "Call.reject(sms=$smsText) called")
                 rejected = true
             }
         } catch (e: Exception) {
@@ -959,6 +1020,24 @@ class CallScreenActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Register flip-to-silence if enabled and call is ringing
+        val isRinging = callStateState.value.contains("Incoming", ignoreCase = true) ||
+                callStateState.value.contains("Ringing", ignoreCase = true)
+        if (isRinging && IncomingCallPreferences.isFlipToSilenceEnabled(this)) {
+            flipHelper.register(onSilenced = {
+                ringerSilenced = true
+                RingtoneHelper.stopRinging()
+            })
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        flipHelper.unregister()
+    }
+
     override fun onDestroy() {
         Log.d("CallScreenActivity", "onDestroy - cleaning up resources")
         
@@ -1173,17 +1252,50 @@ class CallScreenActivity : ComponentActivity() {
     private fun onAddCall() {
         Log.d("CallScreenActivity", "Add call action requested")
         try {
-            // Use ACTION_DIAL to reliably open the dialer
-            val dialIntent = Intent(Intent.ACTION_DIAL).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(dialIntent)
-            
-            // Also show snackbar to inform user
-            showSnackbar("Opening dialer to add call...")
+            // Hold the active call first — the system requires the current call to be on hold
+            // before a second call can be placed.
+            currentCall?.hold()
+            Log.d("CallScreenActivity", "Current call placed on hold before adding new call")
+
+            // Small delay so the hold state is processed by Telecom before the dialer opens
+            handler.postDelayed({
+                try {
+                    val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(dialIntent)
+                    showSnackbar("Current call on hold — dial a new number")
+                } catch (e: Exception) {
+                    Log.e("CallScreenActivity", "Failed to open dialer for add call", e)
+                    // Restore: unhold if we couldn't open the dialer
+                    currentCall?.unhold()
+                    showSnackbar("Could not open dialer")
+                }
+            }, 350)
         } catch (e: Exception) {
-            Log.e("CallScreenActivity", "Failed to open dialer for add call", e)
-            showSnackbar("Could not open dialer")
+            Log.e("CallScreenActivity", "Failed to hold call before add call", e)
+            showSnackbar("Could not add call")
+        }
+    }
+
+    /**
+     * Looks up the Android contacts DB for [phoneNumber] and returns the matching
+     * contact ID, or null if no contact is found or READ_CONTACTS is not granted.
+     */
+    private fun getContactIdForNumber(phoneNumber: String): Long? {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) !=
+                PackageManager.PERMISSION_GRANTED) return null
+        return try {
+            val uri = ContactsContract.PhoneLookup.CONTENT_FILTER_URI
+                .buildUpon().appendPath(phoneNumber).build()
+            contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.PhoneLookup._ID),
+                null, null, null
+            )?.use { if (it.moveToFirst()) it.getLong(0) else null }
+        } catch (e: Exception) {
+            Log.w("CallScreenActivity", "getContactIdForNumber failed: ${e.message}")
+            null
         }
     }
 
@@ -1210,7 +1322,7 @@ private fun formatDuration(seconds: Long): String {
     }
 }
 
-@OptIn(ExperimentalAnimationApi::class)
+@OptIn(ExperimentalAnimationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun CallScreen(
     phoneNumber: String,
@@ -1218,6 +1330,9 @@ fun CallScreen(
     call: Call?,
     onAnswerCall: () -> Unit,
     onRejectCall: () -> Unit,
+    onRejectWithSms: (String) -> Unit = {},
+    onRemindLater: (Long) -> Unit = {},
+    ringerSilenced: Boolean = false,
     onEndCall: () -> Unit,
     onToggleMute: () -> Unit,
     onSetAudioRoute: (Int) -> Unit,
@@ -1238,6 +1353,7 @@ fun CallScreen(
     showKeypad: Boolean,
     onToggleKeypad: () -> Unit,
     getContactName: (String) -> String?,
+    onViewContact: (String) -> Unit = {},
     snackbarHostState: androidx.compose.material3.SnackbarHostState = remember { androidx.compose.material3.SnackbarHostState() },
     // TTY mode (one of TtyHelper.TTY_MODE_*)
     ttyMode: Int = TtyHelper.TTY_MODE_OFF,
@@ -1259,6 +1375,17 @@ fun CallScreen(
     var showAudioRouteMenu by remember { mutableStateOf(false) }
     var showSwapMenu by remember { mutableStateOf(false) }
     var showTtyMenu by remember { mutableStateOf(false) }
+    // Reject-with-SMS sheet state
+    var showRejectSmsSheet by remember { mutableStateOf(false) }
+    val rejectSmsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Remind-later sheet state
+    var showReminderSheet by remember { mutableStateOf(false) }
+    val reminderSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Notes sheet state
+    val context = LocalContext.current
+    var showNotesSheet by remember { mutableStateOf(false) }
+    val notesSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var noteText by remember(phoneNumber) { mutableStateOf(CallNoteHelper.getNote(context, phoneNumber)) }
     
     // Determine current audio route and available routes
     val currentRoute = audioState?.route ?: CallAudioState.ROUTE_EARPIECE
@@ -1582,6 +1709,16 @@ fun CallScreen(
             ) {
                 // Show answer/reject for incoming calls
                 if (isRinging) {
+                    // Ringer-silenced indicator
+                    if (ringerSilenced) {
+                        Text(
+                            text = "Ringer silenced",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF8F9BB3),
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1608,6 +1745,112 @@ fun CallScreen(
                             label = "Answer",
                             iconSize = 32.dp
                         )
+                    }
+
+                    // Second row: Reject with SMS + Remind later
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Reject with SMS
+                        ModernCallButton(
+                            onClick = { showRejectSmsSheet = true },
+                            icon = Icons.Default.Message,
+                            iconColor = Color(0xFF8F9BB3),
+                            backgroundColor = Color.Transparent,
+                            size = 48.dp,
+                            label = "Message",
+                            iconSize = 22.dp,
+                            showBackground = false
+                        )
+
+                        // Remind later
+                        ModernCallButton(
+                            onClick = { showReminderSheet = true },
+                            icon = Icons.Default.AccessTime,
+                            iconColor = Color(0xFF8F9BB3),
+                            backgroundColor = Color.Transparent,
+                            size = 48.dp,
+                            label = "Remind Me",
+                            iconSize = 22.dp,
+                            showBackground = false
+                        )
+                    }
+
+                    // Reject with SMS bottom sheet
+                    if (showRejectSmsSheet) {
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val templates = remember { RejectSmsHelper.getTemplates(context) }
+                        ModalBottomSheet(
+                            onDismissRequest = { showRejectSmsSheet = false },
+                            sheetState = rejectSmsSheetState,
+                            containerColor = Color(0xFF1A2138)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "Reply with message",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(bottom = 12.dp)
+                                )
+                                templates.forEach { template ->
+                                    TextButton(
+                                        onClick = {
+                                            showRejectSmsSheet = false
+                                            onRejectWithSms(template)
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = template,
+                                            color = Color(0xFFCDD5E0),
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(16.dp))
+                            }
+                        }
+                    }
+
+                    // Remind later bottom sheet
+                    if (showReminderSheet) {
+                        ModalBottomSheet(
+                            onDismissRequest = { showReminderSheet = false },
+                            sheetState = reminderSheetState,
+                            containerColor = Color(0xFF1A2138)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "Remind me to call back",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(bottom = 12.dp)
+                                )
+                                listOf(
+                                    "In 5 minutes" to 5 * 60 * 1000L,
+                                    "In 15 minutes" to 15 * 60 * 1000L,
+                                    "In 1 hour" to 60 * 60 * 1000L
+                                ).forEach { (label, delayMs) ->
+                                    TextButton(
+                                        onClick = {
+                                            showReminderSheet = false
+                                            onRemindLater(delayMs)
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            color = Color(0xFFCDD5E0),
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(16.dp))
+                            }
+                        }
                     }
                 } else {
                     // Primary call control buttons
@@ -1835,6 +2078,81 @@ fun CallScreen(
                                                 showSwapMenu = false
                                             }
                                         )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Notes button — opens a note-taking sheet tied to this number
+                        ModernCallButton(
+                            onClick = { showNotesSheet = true },
+                            icon = Icons.Default.Edit,
+                            iconColor = if (noteText.isNotBlank()) primaryColor else Color(0xFF8F9BB3),
+                            backgroundColor = if (noteText.isNotBlank()) primaryColor.copy(alpha = 0.15f) else Color.Transparent,
+                            size = 40.dp,
+                            label = "Notes",
+                            iconSize = 20.dp,
+                            showBackground = noteText.isNotBlank()
+                        )
+
+                        // Contact button — opens the full contact record
+                        ModernCallButton(
+                            onClick = { onViewContact(resolvedNumber) },
+                            icon = Icons.Default.Person,
+                            iconColor = Color(0xFF8F9BB3),
+                            backgroundColor = Color.Transparent,
+                            size = 40.dp,
+                            label = "Contact",
+                            iconSize = 20.dp,
+                            showBackground = false
+                        )
+                    }
+
+                    // Notes bottom sheet
+                    if (showNotesSheet) {
+                        ModalBottomSheet(
+                            onDismissRequest = { showNotesSheet = false },
+                            sheetState = notesSheetState,
+                            containerColor = Color(0xFF1A2138)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 32.dp)) {
+                                Text(
+                                    text = "Call Notes",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(bottom = 12.dp)
+                                )
+                                OutlinedTextField(
+                                    value = noteText,
+                                    onValueChange = { updated ->
+                                        noteText = updated
+                                        CallNoteHelper.saveNote(context, resolvedNumber, updated)
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(160.dp),
+                                    placeholder = {
+                                        Text(
+                                            "Type a note about this call…",
+                                            color = Color(0xFF8F9BB3)
+                                        )
+                                    },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedBorderColor = primaryColor,
+                                        unfocusedBorderColor = Color(0xFF3A4A6B),
+                                        cursorColor = primaryColor
+                                    )
+                                )
+                                if (noteText.isNotBlank()) {
+                                    TextButton(
+                                        onClick = {
+                                            CallNoteHelper.clearNote(context, resolvedNumber)
+                                            noteText = ""
+                                        }
+                                    ) {
+                                        Text("Clear note", color = Color(0xFF8F9BB3))
                                     }
                                 }
                             }

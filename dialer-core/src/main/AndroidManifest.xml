@@ -39,6 +39,10 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"
         tools:ignore="FullScreenIntentPolicy" />
 
+    <!-- Exact alarm for callback reminders (API 31+; API 33+ uses USE_EXACT_ALARM which needs no grant) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
     <!-- Telephony feature requirements (optional for development/testing) -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <uses-feature android:name="android.hardware.telephony.gsm" android:required="false" />
@@ -105,12 +109,6 @@
             android:exported="false"
             android:launchMode="standard"
             android:screenOrientation="portrait" />
-            <!-- Deep-link target from missed-call notification -->
-            <intent-filter>
-                <action android:name="com.fayyaztech.dialer_core.ACTION_VIEW_CALL_LOG" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
 
         <!-- In-Call Screen Activity -->
         <activity
@@ -143,10 +141,10 @@
             android:permission="android.permission.BIND_INCALL_SERVICE"
             android:exported="true"
             android:foregroundServiceType="phoneCall">
-            <!-- Advertise that this service plays ringtones for incoming calls -->
-<!--            <meta-data-->
-<!--                android:name="android.telecom.IN_CALL_SERVICE_RINGING"-->
-<!--                android:value="false" />-->
+            <!-- App handles ringtone playback itself (custom per-contact/SIM ringtones) -->
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_RINGING"
+                android:value="true" />
             <!-- Advertise basic in-call UI capability (Android 12+) -->
             <meta-data
                 android:name="android.telecom.IN_CALL_SERVICE_UI"
@@ -187,12 +185,17 @@
             </intent-filter>
         </receiver>
 
-        <!-- Call Action Receiver (handles notification actions: accept/reject/hangup) -->
+        <!-- Call Action Receiver (handles notification actions: accept/reject/hangup/reject-with-sms) -->
         <receiver
             android:name="com.fayyaztech.dialer_core.services.CallActionReceiver"
             android:enabled="true"
             android:exported="false">
         </receiver>
+
+        <!-- Reminder Receiver (callback reminder alarm fires here) -->
+        <receiver
+            android:name="com.fayyaztech.dialer_core.services.ReminderReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

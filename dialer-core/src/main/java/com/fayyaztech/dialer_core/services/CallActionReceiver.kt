@@ -15,6 +15,13 @@ class CallActionReceiver : BroadcastReceiver() {
             "REJECT_CALL" -> {
                 Log.d("CallActionReceiver", "Reject call action received")
                 DefaultInCallService.currentCall?.reject(false, null)
+                RingtoneHelper.stopRinging()
+            }
+            "REJECT_WITH_SMS" -> {
+                val smsText = intent.getStringExtra("SMS_TEXT")
+                Log.d("CallActionReceiver", "Reject with SMS: $smsText")
+                DefaultInCallService.currentCall?.reject(smsText != null, smsText)
+                RingtoneHelper.stopRinging()
             }
             "HANGUP_CALL" -> {
                 Log.d("CallActionReceiver", "Hangup call action received")

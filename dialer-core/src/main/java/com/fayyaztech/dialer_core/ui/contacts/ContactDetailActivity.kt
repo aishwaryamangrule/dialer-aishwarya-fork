@@ -85,7 +85,9 @@ import com.fayyaztech.dialer_core.services.ContactDetail
 import com.fayyaztech.dialer_core.services.ContactPhone
 import com.fayyaztech.dialer_core.services.ContactsHelper
 import com.fayyaztech.dialer_core.services.DuplicateGroup
+import com.fayyaztech.dialer_core.services.SimPreferenceHelper
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
+import com.fayyaztech.dialer_core.ui.dialer.DialerActivity
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -177,14 +179,23 @@ private fun ContactDetailScreen(
     var showAccountPicker by remember { mutableStateOf(false) }
     var showMoreMenu     by remember { mutableStateOf(false) }
 
+    // ── SIM preference (view mode) ─────────────────────────────────────────────
+    var simList          by remember { mutableStateOf<List<SimSelectionHelper.SimInfo>>(emptyList()) }
+    var preferredSimSubId by remember { mutableStateOf(-1) }
+    var showSimPrefPicker by remember { mutableStateOf(false) }
+
     // ── Load contact ───────────────────────────────────────────────────────────
     LaunchedEffect(contactId) {
+        // Load SIM list once (cheap — just reads system state)
+        simList = withContext(Dispatchers.IO) { SimSelectionHelper.getAvailableSims(context) }
+
         if (contactId == null) {
             isLoading = false
             accounts  = withContext(Dispatchers.IO) { ContactsHelper.getSyncAccounts(context) }
             if (selectedAccount == null) selectedAccount = accounts.firstOrNull()
             return@LaunchedEffect
         }
+        preferredSimSubId = SimPreferenceHelper.getContactSimSubId(context, contactId)
         isLoading = true
         val loaded = withContext(Dispatchers.IO) { ContactsHelper.getContactDetail(context, contactId) }
         contact = loaded
@@ -486,13 +497,49 @@ private fun ContactDetailScreen(
                     }
                 } else {
                     items(phones, key = { it.dataId }) { phone ->
-                        ViewPhoneRow(phone = phone, context = context)
+                        ViewPhoneRow(
+                            phone            = phone,
+                            context          = context,
+                        )
                         HorizontalDivider(
                             modifier  = Modifier.padding(start = 16.dp),
                             thickness = 0.5.dp,
                             color     = MaterialTheme.colorScheme.outlineVariant,
                         )
                     }
+                }
+            }
+
+            // ── Preferred SIM section (view mode, multi-SIM only) ─────────────
+            if (!isEditMode && contactId != null && simList.size > 1) {
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text     = "Preferred SIM",
+                        style    = MaterialTheme.typography.labelMedium,
+                        color    = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                    val currentSim = simList.find { it.subscriptionId == preferredSimSubId }
+                    val label = currentSim?.let { "SIM ${it.slotIndex + 1}: ${it.displayName}" }
+                        ?: "None – ask each time"
+                    Row(
+                        modifier            = Modifier
+                            .fillMaxWidth()
+                            .clickable { showSimPrefPicker = true }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment   = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                        Text("Change", color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelMedium)
+                    }
+                    HorizontalDivider(
+                        modifier  = Modifier.padding(start = 16.dp),
+                        thickness = 0.5.dp,
+                        color     = MaterialTheme.colorScheme.outlineVariant,
+                    )
                 }
             }
 
@@ -583,6 +630,73 @@ private fun ContactDetailScreen(
             },
         )
     }
+
+    // ── SIM preference picker ─────────────────────────────────────────────────
+    if (showSimPrefPicker && contactId != null) {
+        AlertDialog(
+            onDismissRequest = { showSimPrefPicker = false },
+            title   = { Text("Preferred SIM") },
+            text    = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // "None" option
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                SimPreferenceHelper.setContactSimSubId(context, contactId, -1)
+                                preferredSimSubId  = -1
+                                showSimPrefPicker  = false
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        androidx.compose.material3.RadioButton(
+                            selected = preferredSimSubId < 0,
+                            onClick  = null,
+                        )
+                        Text("None – ask each time")
+                    }
+                    simList.forEach { sim ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    SimPreferenceHelper.setContactSimSubId(context, contactId, sim.subscriptionId)
+                                    preferredSimSubId = sim.subscriptionId
+                                    showSimPrefPicker = false
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = preferredSimSubId == sim.subscriptionId,
+                                onClick  = null,
+                            )
+                            Column {
+                                Text(
+                                    "SIM ${sim.slotIndex + 1}: ${sim.displayName}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                if (sim.phoneNumber.isNotBlank()) {
+                                    Text(
+                                        sim.phoneNumber,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showSimPrefPicker = false }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 // =============================================================================
@@ -591,16 +705,16 @@ private fun ContactDetailScreen(
 
 /**
  * Displays a single phone number in view mode with three action buttons:
- *  - **Call** (green) — places a call via [SimSelectionHelper.placeCall]; this is the
- *    "quick dial from contact card" feature.
+ *  - **Call** (green) — opens [DialerActivity] in auto-call mode so the unified SIM policy
+ *    (per-contact preference, ask-each-time, default SIM, roaming warning) is applied.
  *  - **Message** — opens the system SMS app with the number pre-filled.
  *  - **Copy** — copies the number to the clipboard.
  */
 @Composable
-private fun ViewPhoneRow(phone: ContactPhone, context: Context) {
-    val scope = rememberCoroutineScope()
-    val simList = remember { SimSelectionHelper.getAvailableSims(context) }
-
+private fun ViewPhoneRow(
+    phone: ContactPhone,
+    context: Context,
+) {
     Row(
         modifier          = Modifier
             .fillMaxWidth()
@@ -633,22 +747,13 @@ private fun ViewPhoneRow(phone: ContactPhone, context: Context) {
 
         // ── Call button (Quick Dial from Contact Card) ─────────────────────────
         IconButton(onClick = {
-            when {
-                simList.size > 1 -> {
-                    // For multi-SIM, use first SIM (the detail screen doesn't show a picker;
-                    // a richer implementation would show the SIM picker dialog here)
-                    SimSelectionHelper.placeCall(context, phone.number, simList[0].phoneAccountHandle)
-                }
-                simList.size == 1 -> {
-                    SimSelectionHelper.placeCall(context, phone.number, simList[0].phoneAccountHandle)
-                }
-                else -> {
-                    val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${phone.number}")).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    }
-                    context.startActivity(intent)
-                }
+            // Route through DialerActivity so all SIM rules are applied in one place.
+            val intent = Intent(context, DialerActivity::class.java).apply {
+                putExtra("PHONE_NUMBER", phone.number)
+                putExtra(DialerActivity.EXTRA_AUTO_PLACE_CALL, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            context.startActivity(intent)
         }) {
             Icon(
                 Icons.Filled.Call,

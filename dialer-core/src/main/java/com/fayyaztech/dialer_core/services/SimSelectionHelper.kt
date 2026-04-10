@@ -8,6 +8,7 @@ import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.SubscriptionInfo
 import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
 
@@ -157,6 +158,29 @@ object SimSelectionHelper {
             Log.d(TAG, "placeCall → uri=$uri, handle=$handle")
         } catch (e: Exception) {
             Log.e(TAG, "placeCall failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Returns `true` when the mobile network currently serving [subscriptionId] is a roaming
+     * network (i.e. the device is outside its home network).
+     *
+     * Falls back to `false` when [android.Manifest.permission.READ_PHONE_STATE] is not granted
+     * or when the subscription is invalid.
+     *
+     * @param subscriptionId The telephony subscription ID to check; `-1` uses the default.
+     */
+    fun isRoaming(context: Context, subscriptionId: Int): Boolean {
+        if (!hasReadPhoneStatePermission(context)) return false
+        return try {
+            val baseTm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+                ?: return false
+            val tm = if (subscriptionId >= 0) baseTm.createForSubscriptionId(subscriptionId) else baseTm
+            @Suppress("MissingPermission")
+            tm.isNetworkRoaming
+        } catch (e: Exception) {
+            Log.w(TAG, "isRoaming check failed for subscriptionId=$subscriptionId: ${e.message}")
+            false
         }
     }
 
