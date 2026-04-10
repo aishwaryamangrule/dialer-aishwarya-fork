@@ -93,6 +93,7 @@ import com.fayyaztech.dialer_core.services.CallLogEntry
 import com.fayyaztech.dialer_core.services.CallLogFilter
 import com.fayyaztech.dialer_core.services.CallLogHelper
 import com.fayyaztech.dialer_core.services.CallType
+import com.fayyaztech.dialer_core.ui.theme.DialathonBrandHeader
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -358,10 +359,14 @@ private fun CallLogTopBar(
 ) {
     TopAppBar(
         title = {
-            Text(
-                text = if (isSelectionMode) "$selectionCount selected" else "Call History",
-                style = MaterialTheme.typography.titleLarge,
-            )
+            if (isSelectionMode) {
+                Text(
+                    text = "$selectionCount selected",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            } else {
+                DialathonBrandHeader(logoSizeDp = 28)
+            }
         },
         navigationIcon = {
             IconButton(onClick = onNavigateUp) {

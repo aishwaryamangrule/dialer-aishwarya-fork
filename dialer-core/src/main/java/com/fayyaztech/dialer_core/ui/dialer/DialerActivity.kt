@@ -72,6 +72,7 @@ import com.fayyaztech.dialer_core.services.T9SearchHelper
 import com.fayyaztech.dialer_core.services.UssdHelper
 import com.fayyaztech.dialer_core.ui.contacts.ContactDetailActivity
 import com.fayyaztech.dialer_core.ui.contacts.ContactsActivity
+import com.fayyaztech.dialer_core.ui.theme.DialathonBrandHeader
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -685,11 +686,17 @@ internal fun DialerScreen(
                 .padding(top = 40.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Contacts shortcut button in top-right corner
+            // App branding + contacts shortcut
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                DialathonBrandHeader(
+                    titleColor = Color.White,
+                    taglineColor = TextSub,
+                    logoSizeDp = 34,
+                )
                 androidx.compose.material3.IconButton(onClick = onOpenContacts) {
                     Icon(
                         imageVector        = Icons.Default.Person,

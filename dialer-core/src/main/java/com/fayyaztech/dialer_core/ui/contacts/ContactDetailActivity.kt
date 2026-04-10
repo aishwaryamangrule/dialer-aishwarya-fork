@@ -88,6 +88,7 @@ import com.fayyaztech.dialer_core.services.DuplicateGroup
 import com.fayyaztech.dialer_core.services.SimPreferenceHelper
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
 import com.fayyaztech.dialer_core.ui.dialer.DialerActivity
+import com.fayyaztech.dialer_core.ui.theme.DialathonBrandHeader
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -272,7 +273,13 @@ private fun ContactDetailScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(if (contactId == null) "New Contact" else if (isEditMode) "Edit Contact" else "Contact")
+                    DialathonBrandHeader(
+                        title = if (contactId == null) "Dialathon - New Contact"
+                                else if (isEditMode) "Dialathon - Edit Contact"
+                                else "Dialathon - Contact",
+                        showTagline = true,
+                        logoSizeDp = 24,
+                    )
                 },
                 navigationIcon = {
                     IconButton(onClick = {

@@ -82,6 +82,7 @@ import com.fayyaztech.dialer_core.services.ContactDetail
 import com.fayyaztech.dialer_core.services.ContactsHelper
 import com.fayyaztech.dialer_core.services.SimContact
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
+import com.fayyaztech.dialer_core.ui.theme.DialathonBrandHeader
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -223,7 +224,11 @@ private fun ContactsScreen(
         topBar = {
             Column {
                 TopAppBar(
-                    title = { Text("Contacts") },
+                    title = {
+                        DialathonBrandHeader(
+                            logoSizeDp = 28,
+                        )
+                    },
                     navigationIcon = {
                         IconButton(onClick = onNavigateUp) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")

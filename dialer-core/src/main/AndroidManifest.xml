@@ -75,7 +75,8 @@
     <!-- IMS features: VoLTE, VoWiFi, RTT (all optional — carrier-dependent) -->
     <uses-feature android:name="android.hardware.telephony.ims" android:required="false" />
 
-    <application>
+    <application
+        android:label="Dialathon">
         <!-- Pre-Call Dialer Activity: T9 smart dial, copy/paste, speed dial (long-press 1–9) -->
         <activity
             android:name="com.fayyaztech.dialer_core.ui.dialer.DialerActivity"
