@@ -43,6 +43,31 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
+    <!-- Battery optimization exemption: request whitelisting so Doze/OEM savers don't kill reminders -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+        OEM auto-start / permission-manager packages queried via intent at runtime.
+        Android 11+ (API 30) requires explicit <queries> declarations to resolve
+        third-party package intents — without this the PackageManager returns null
+        even when the OEM app is installed.
+    -->
+    <queries>
+        <!-- Xiaomi / MIUI Security Center -->
+        <package android:name="com.miui.securitycenter" />
+        <!-- Huawei SystemManager -->
+        <package android:name="com.huawei.systemmanager" />
+        <!-- OPPO / ColorOS Safe Center -->
+        <package android:name="com.coloros.safecenter" />
+        <package android:name="com.oppo.safe" />
+        <!-- Vivo Permission Manager -->
+        <package android:name="com.vivo.permissionmanager" />
+        <!-- OnePlus Security -->
+        <package android:name="com.oneplus.security" />
+        <!-- Realme Power Manager -->
+        <package android:name="com.realmepowermanager" />
+    </queries>
+
     <!-- Telephony feature requirements (optional for development/testing) -->
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <uses-feature android:name="android.hardware.telephony.gsm" android:required="false" />

@@ -61,7 +61,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import com.fayyaztech.dialer_core.services.BatteryOptimizationHelper
 import com.fayyaztech.dialer_core.services.CarrierFeatureHelper
+import com.fayyaztech.dialer_core.services.OemCompatibilityHelper
 import com.fayyaztech.dialer_core.services.SimPreferenceHelper
 import com.fayyaztech.dialer_core.services.SimSelectionHelper
 import com.fayyaztech.dialer_core.services.SpeedDialHelper
@@ -117,6 +119,10 @@ class DialerActivity : ComponentActivity() {
     // SIM picker dialog
     private var showSimPicker by mutableStateOf(false)
     private var pendingNumber by mutableStateOf("")
+
+    // OEM first-launch dialogs
+    private var showBatteryExemptionDialog by mutableStateOf(false)
+    private var showAutoStartDialog        by mutableStateOf(false)
 
     // Roaming warning dialog — shown before placing a call on a roaming SIM
     private var showRoamingWarning by mutableStateOf(false)
@@ -213,12 +219,106 @@ class DialerActivity : ComponentActivity() {
                         featureSuggestions  = featureSuggestions,
                         onFeatureCodeCall   = { code -> initiateCall(code) },
                     )
+
+                    // ── Battery optimization exemption prompt (first-launch) ──
+                    if (showBatteryExemptionDialog) {
+                        AlertDialog(
+                            onDismissRequest = {
+                                showBatteryExemptionDialog = false
+                                // Show auto-start prompt after battery dialog is dismissed
+                                if (OemCompatibilityHelper.isRestrictiveOem &&
+                                    !OemCompatibilityHelper.hasShownAutoStartDialog(this)) {
+                                    OemCompatibilityHelper.markAutoStartDialogShown(this)
+                                    showAutoStartDialog = true
+                                }
+                            },
+                            title = { Text("Keep Calls Reliable") },
+                            text = {
+                                Text(
+                                    "To ensure call reminders and notifications are delivered " +
+                                    "reliably, allow this app to run without battery restrictions."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showBatteryExemptionDialog = false
+                                    BatteryOptimizationHelper.requestExemption(this)
+                                    if (OemCompatibilityHelper.isRestrictiveOem &&
+                                        !OemCompatibilityHelper.hasShownAutoStartDialog(this)) {
+                                        OemCompatibilityHelper.markAutoStartDialogShown(this)
+                                        showAutoStartDialog = true
+                                    }
+                                }) { Text("Allow") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = {
+                                    showBatteryExemptionDialog = false
+                                    if (OemCompatibilityHelper.isRestrictiveOem &&
+                                        !OemCompatibilityHelper.hasShownAutoStartDialog(this)) {
+                                        OemCompatibilityHelper.markAutoStartDialogShown(this)
+                                        showAutoStartDialog = true
+                                    }
+                                }) { Text("Not Now") }
+                            },
+                        )
+                    }
+
+                    // ── Auto-start permission prompt (OEM devices, first-launch) ──
+                    if (showAutoStartDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showAutoStartDialog = false },
+                            title = { Text("Enable Auto-Start") },
+                            text = {
+                                Text(
+                                    "Your device's security manager may prevent this app from " +
+                                    "starting automatically. Enable Auto-Start in Settings to " +
+                                    "receive incoming call notifications reliably."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showAutoStartDialog = false
+                                    OemCompatibilityHelper.openAutoStartSettings(this)
+                                }) { Text("Open Settings") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showAutoStartDialog = false }) {
+                                    Text("Skip")
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
 
         if (shouldAutoPlaceCall(intent) && dialedNumber.isNotBlank()) {
             initiateCall(dialedNumber)
+        }
+
+        // First-launch OEM compatibility prompts
+        checkFirstLaunchOemPrompts()
+    }
+
+    /**
+     * On first launch, prompt the user to:
+     *  1. Exempt the app from battery optimization (all devices, API 23+)
+     *  2. Enable auto-start in OEM security managers (Xiaomi, Huawei, OPPO, Vivo, etc.)
+     *
+     * Each prompt is shown at most once (tracked in SharedPreferences).
+     * The auto-start prompt is only shown on OEMs known to restrict background starts.
+     */
+    private fun checkFirstLaunchOemPrompts() {
+        if (!BatteryOptimizationHelper.hasShownExemptionDialog(this) &&
+            !BatteryOptimizationHelper.isIgnoringOptimizations(this)) {
+            BatteryOptimizationHelper.markExemptionDialogShown(this)
+            showBatteryExemptionDialog = true
+            return // Show battery dialog first; auto-start dialog shown after dismissal
+        }
+        if (OemCompatibilityHelper.isRestrictiveOem &&
+            !OemCompatibilityHelper.hasShownAutoStartDialog(this)) {
+            OemCompatibilityHelper.markAutoStartDialogShown(this)
+            showAutoStartDialog = true
         }
     }
 

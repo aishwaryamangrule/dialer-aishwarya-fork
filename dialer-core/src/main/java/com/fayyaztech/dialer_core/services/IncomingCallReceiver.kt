@@ -79,7 +79,16 @@ class IncomingCallReceiver : BroadcastReceiver() {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             }
-            
+
+            // On OEMs with aggressive overlay restrictions (Xiaomi MIUI, Huawei, etc.)
+            // the activity may be blocked from appearing over the lock screen.
+            // We pass a hint extra so CallScreenActivity can apply additional
+            // workarounds (e.g. logging, telemetry, or an alternate UI path).
+            if (OemCompatibilityHelper.isRestrictiveOem) {
+                intent.putExtra("OEM_OVERLAY_RESTRICTED", true)
+                Log.d(TAG, "OEM overlay-restriction flag set for ${android.os.Build.MANUFACTURER}")
+            }
+
             context.startActivity(intent)
             Log.d(TAG, "Call screen launched successfully for: $phoneNumber")
         } catch (e: SecurityException) {

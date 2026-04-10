@@ -29,6 +29,7 @@ import com.fayyaztech.dialer_core.ui.calllog.EXTRA_FILTER_TYPE
 import com.fayyaztech.dialer_core.ui.dialer.DialerActivity
 import com.fayyaztech.dialer_core.callbacks.CallStateListener
 import com.fayyaztech.dialer_core.services.IncomingCallPreferences
+import com.fayyaztech.dialer_core.services.PowerPolicyHelper
 import com.fayyaztech.dialer_core.services.RingtoneHelper
 
 /**
@@ -644,6 +645,16 @@ class DefaultInCallService : InCallService() {
     private fun showIncomingCallNotification(call: Call) {
         val phoneNumber = call.details.handle?.schemeSpecificPart ?: "Unknown"
         val contactName = getContactName(phoneNumber) ?: phoneNumber
+
+        // Log policy state so OEM debugging is easier; calls are still always shown.
+        // Telecom framework guarantees delivery for in-call notifications regardless of DND
+        // (CallStyle notifications are CATEGORY_CALL which bypasses most restrictions).
+        val policy = PowerPolicyHelper.getPolicyState(this)
+        if (policy.isRestricted) {
+            Log.w(TAG, "showIncomingCallNotification: policy restricted " +
+                    "[dnd=${policy.dndActive}, powerSave=${policy.powerSaveActive}] — " +
+                    "CallStyle notification will still attempt to show via Telecom")
+        }
 
         val fullScreenIntent = Intent(this, CallScreenActivity::class.java).apply {
             putExtra("PHONE_NUMBER", phoneNumber)
