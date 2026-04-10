@@ -20,9 +20,12 @@ import android.util.Log
 import android.Manifest
 import android.content.pm.PackageManager
 import android.provider.ContactsContract
+import android.telecom.TelecomManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.fayyaztech.dialer_core.ui.call.CallScreenActivity
+import com.fayyaztech.dialer_core.ui.calllog.CallLogActivity
+import com.fayyaztech.dialer_core.ui.calllog.EXTRA_FILTER_TYPE
 import com.fayyaztech.dialer_core.callbacks.CallStateListener
 
 /**
@@ -41,7 +44,89 @@ class DefaultInCallService : InCallService() {
         const val EXTRA_AUDIO_STATE = "EXTRA_AUDIO_STATE"
         var currentCall: Call? = null
         var callDisconnectedBy: String = "Unknown"
-        
+
+        // -----------------------------------------------------------------------
+        // SIM / account info exposed to the UI layer
+        // -----------------------------------------------------------------------
+
+        /** PhoneAccountHandle ID string of the SIM that owns [currentCall]. Null when unknown. */
+        var currentCallSimId: String? = null
+
+        // -----------------------------------------------------------------------
+        // TTY mode cache
+        // -----------------------------------------------------------------------
+
+        /** Last-known TTY mode (one of TtyHelper.TTY_MODE_*). Updated on each call added. */
+        var currentTtyMode: Int = TtyHelper.TTY_MODE_OFF
+            private set
+
+        /**
+         * Request a TTY mode change. Delegates to [TtyHelper.setTtyMode].
+         * Requires the app to be the default dialer.
+         *
+         * @param mode One of [TtyHelper.TTY_MODE_OFF], [TtyHelper.TTY_MODE_FULL],
+         *             [TtyHelper.TTY_MODE_HCO], [TtyHelper.TTY_MODE_VCO].
+         */
+        fun setTtyMode(mode: Int) {
+            instance?.let { svc ->
+                val sent = TtyHelper.setTtyMode(svc, mode)
+                if (sent) {
+                    currentTtyMode = mode
+                    Log.d(TAG, "TTY mode set to ${TtyHelper.modeName(mode)}")
+                }
+            } ?: Log.w(TAG, "setTtyMode: service not bound")
+        }
+
+        /**
+         * Refreshes [currentTtyMode] from the system and returns it.
+         * Call this when the UI needs an up-to-date value.
+         */
+        fun refreshTtyMode(): Int {
+            instance?.let { svc ->
+                currentTtyMode = TtyHelper.getCurrentTtyMode(svc)
+            }
+            return currentTtyMode
+        }
+
+        // -----------------------------------------------------------------------
+        // VoLTE / VoWiFi badge
+        // -----------------------------------------------------------------------
+
+        /**
+         * Returns a short network-type badge label ("VoLTE", "VoWiFi", "5G", or null).
+         * Null means a plain GSM/WCDMA call with no special badge.
+         */
+        fun getNetworkBadgeLabel(): String? {
+            return instance?.let { ImsStatusHelper.getNetworkBadgeLabel(it) }
+        }
+
+        // -----------------------------------------------------------------------
+        // Emergency call detection
+        // -----------------------------------------------------------------------
+
+        /**
+         * Returns true if [call] is an emergency call.
+         * Uses Call.Details property flags and a TelecomManager query as fallback.
+         */
+        fun isEmergencyCall(call: Call?): Boolean {
+            if (call == null) return false
+            // Primary: check documented Call.Details property
+            if (call.details.hasProperty(Call.Details.PROPERTY_EMERGENCY_CALLBACK_MODE)) return true
+            // Secondary: TelecomManager.isInEmergencyCall (API 29+, hidden — use reflection)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return try {
+                    val tm = instance?.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                    if (tm != null) {
+                        val method = tm.javaClass.getMethod("isInEmergencyCall")
+                        method.invoke(tm) as? Boolean == true
+                    } else false
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            return false
+        }
+
         // Platform-agnostic callback listener for call state changes
         private var callStateListener: CallStateListener? = null
         
@@ -465,11 +550,29 @@ class DefaultInCallService : InCallService() {
         call?.registerCallback(callCallback)
         updateCallNotification()
 
+        // Cache which SIM this call is on
+        currentCallSimId = call?.details?.accountHandle?.id
+        Log.d(TAG, "onCallAdded: simId=$currentCallSimId")
+
+        // Refresh TTY mode whenever a new call arrives
+        currentTtyMode = TtyHelper.getCurrentTtyMode(this)
+        Log.d(TAG, "onCallAdded: ttyMode=${TtyHelper.modeName(currentTtyMode)}")
+
+        // Log network type (VoLTE / VoWiFi) for diagnostics
+        val badge = ImsStatusHelper.getNetworkBadgeLabel(this)
+        Log.d(TAG, "onCallAdded: networkBadge=${badge ?: "GSM/WCDMA"}")
+
+        // Emergency-call handling: skip any call-screening logic and force full-screen UI
+        val isEmergency = isEmergencyCall(call)
+        if (isEmergency) {
+            Log.w(TAG, "onCallAdded: EMERGENCY CALL detected — bypassing screening")
+        }
+
         // Launch call screen for new calls if it's not already showing or if it's incoming
         if (call?.state == Call.STATE_RINGING) {
-            launchCallScreen(call, "Incoming call...")
+            launchCallScreen(call, if (isEmergency) "Emergency Call" else "Incoming call...")
         } else if (call?.state == Call.STATE_DIALING || call?.state == Call.STATE_CONNECTING) {
-            launchCallScreen(call, "Dialing...")
+            launchCallScreen(call, if (isEmergency) "Emergency Call" else "Dialing...")
         }
     }
 
@@ -665,34 +768,45 @@ class DefaultInCallService : InCallService() {
 
     private fun showMissedCallNotification(call: Call) {
         val phoneNumber = call.details.handle?.schemeSpecificPart ?: "Unknown"
-        val openHistoryIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+
+        // Deep-link content tap → CallLogActivity filtered to Missed tab
+        val openLogIntent = Intent(this, CallLogActivity::class.java).apply {
+            putExtra(EXTRA_FILTER_TYPE, 3 /* CallType.MISSED.code */)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        } ?: return
-        val openHistoryPendingIntent = PendingIntent.getActivity(
-            this, 100, openHistoryIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        }
+        val openLogPendingIntent = PendingIntent.getActivity(
+            this, 100, openLogIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        // "Call Back" action
         val callBackIntent = Intent(Intent.ACTION_CALL).apply {
             data = android.net.Uri.parse("tel:$phoneNumber")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val callBackPendingIntent = PendingIntent.getActivity(
-            this, 101, callBackIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            this, 101, callBackIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
+        // Count unread missed calls for badge number
+        val missedCount = CallLogHelper.unreadMissedCount(this).coerceAtLeast(1)
 
         val notification = NotificationCompat.Builder(this, "missed_call_channel")
             .setSmallIcon(android.R.drawable.stat_notify_missed_call)
-            .setContentTitle("Missed Call")
+            .setContentTitle(if (missedCount == 1) "Missed Call" else "$missedCount Missed Calls")
             .setContentText("Missed call from $phoneNumber")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setContentIntent(openHistoryPendingIntent)
+            .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
+            .setContentIntent(openLogPendingIntent)
             .setAutoCancel(true)
+            .setNumber(missedCount)
+            .setGroup("missed_calls")
             .addAction(android.R.drawable.sym_action_call, "Call Back", callBackPendingIntent)
             .build()
 
         val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(2, notification)
+        notificationManager.notify(1001, notification)
     }
 
     private fun launchCallScreen(call: Call?, callState: String) {

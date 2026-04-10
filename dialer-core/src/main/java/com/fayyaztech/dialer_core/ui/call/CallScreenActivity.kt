@@ -70,6 +70,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import com.fayyaztech.dialer_core.services.DefaultInCallService
+import com.fayyaztech.dialer_core.services.ImsStatusHelper
+import com.fayyaztech.dialer_core.services.SimSelectionHelper
+import com.fayyaztech.dialer_core.services.TtyHelper
 import com.fayyaztech.dialer_core.ui.theme.DefaultDialerTheme
 import java.util.Locale
 import kotlinx.coroutines.delay
@@ -117,6 +120,15 @@ class CallScreenActivity : ComponentActivity() {
     private val snackbarHostState = mutableStateOf(androidx.compose.material3.SnackbarHostState())
     private var isReceiverRegistered = false
     private val allCallsState = mutableStateOf<List<Call>>(emptyList())
+
+    // TTY mode state — driven by TtyHelper / DefaultInCallService
+    private val ttyModeState = mutableStateOf(TtyHelper.TTY_MODE_OFF)
+    // VoLTE / VoWiFi badge label (null = plain GSM call)
+    private val networkBadgeState = mutableStateOf<String?>(null)
+    // Whether the current call is an emergency call
+    private val isEmergencyCallState = mutableStateOf(false)
+    // SIM label for the current call (e.g. "SIM 1 – Carrier")
+    private val simLabelState = mutableStateOf<String?>(null)
 
     private val audioStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -169,11 +181,8 @@ class CallScreenActivity : ComponentActivity() {
         // Get the current call from the in-call service
         currentCall = DefaultInCallService.currentCall
 
-        // Ensure phone number is populated preferably from the current Call details.
-        refreshPhoneNumberFromCallOrIntent()
-
-        // Update call count
-        updateCallCount()
+        // Populate supplemental call metadata
+        refreshCallMetadata()
 
         // Register callback to monitor call state
         currentCall?.registerCallback(callCallback)
@@ -227,7 +236,12 @@ class CallScreenActivity : ComponentActivity() {
                              showKeypad = showKeypad,
                              onToggleKeypad = { showKeypad = !showKeypad },
                              getContactName = { number -> getContactName(number) },
-                             snackbarHostState = snackbarHostState.value
+                             snackbarHostState = snackbarHostState.value,
+                             ttyMode = ttyModeState.value,
+                             onSetTtyMode = { mode -> setTtyMode(mode) },
+                             networkBadge = networkBadgeState.value,
+                             isEmergencyCall = isEmergencyCallState.value,
+                             simLabel = simLabelState.value
                      )
                 }
             }
@@ -804,6 +818,8 @@ class CallScreenActivity : ComponentActivity() {
                         "CallScreenActivity",
                         "Call updates - total: ${calls.size}, canMerge: ${canMergeState.value}, canSwap: ${canSwapState.value}"
                 )
+                // Refresh TTY/network/SIM/emergency info whenever call state changes
+                refreshCallMetadata()
             } catch (e: Exception) {
                 Log.w("CallScreenActivity", "Failed to get call count: ${e.message}")
                 callCountState.value = 1
@@ -848,9 +864,8 @@ class CallScreenActivity : ComponentActivity() {
                 "CallScreenActivity",
                 "canMergeCalls: Active call merge capability: $hasMergeCapability"
             )
-            
-            // Even if capability is false, we can try to show it if there are 2+ calls as per user request
-            return true 
+
+            return hasMergeCapability
         } catch (e: Exception) {
             Log.w("CallScreenActivity", "canMergeCalls failed: ${e.message}", e)
             return false
@@ -883,6 +898,44 @@ class CallScreenActivity : ComponentActivity() {
         }
     }
 
+
+    /**
+     * Refreshes TTY mode, VoLTE/VoWiFi badge, emergency flag, and SIM label.
+     * Called from onCreate, onNewIntent, and updateCallCount.
+     */
+    private fun refreshCallMetadata() {
+        handler.post {
+            // TTY mode
+            ttyModeState.value = DefaultInCallService.refreshTtyMode()
+            // Network badge (VoLTE / VoWiFi / 5G)
+            networkBadgeState.value = ImsStatusHelper.getNetworkBadgeLabel(this)
+            // Emergency call detection
+            isEmergencyCallState.value = DefaultInCallService.isEmergencyCall(currentCall)
+            // SIM label from SimSelectionHelper
+            simLabelState.value = resolveSimLabel()
+            Log.d(
+                "CallScreenActivity",
+                "refreshCallMetadata: tty=${TtyHelper.modeName(ttyModeState.value)}, " +
+                "badge=${networkBadgeState.value}, emergency=${isEmergencyCallState.value}, " +
+                "sim=${simLabelState.value}"
+            )
+        }
+    }
+
+    /** Resolves a short SIM label (e.g. "SIM 1 – Carrier") for the current call. */
+    private fun resolveSimLabel(): String? {
+        val simId = DefaultInCallService.currentCallSimId ?: return null
+        val sims = SimSelectionHelper.getAvailableSims(this)
+        val match = sims.firstOrNull { it.phoneAccountHandle?.id == simId } ?: return null
+        val slot = match.slotIndex + 1
+        return "SIM $slot – ${match.displayName}"
+    }
+
+    /** Requests a TTY mode change and refreshes state. */
+    private fun setTtyMode(mode: Int) {
+        DefaultInCallService.setTtyMode(mode)
+        ttyModeState.value = mode
+    }
 
     /**
      * Ensures phoneNumberState is populated. Prefer the number from the active Call's handle
@@ -968,7 +1021,8 @@ class CallScreenActivity : ComponentActivity() {
         }
 
         updateCallCount()
- 
+        refreshCallMetadata()
+
         // Reset ending flag if we are getting a new valid call
         isEndingCall = false
         
@@ -978,28 +1032,18 @@ class CallScreenActivity : ComponentActivity() {
         }
     }
 
-    // Conference action — placeholder (logs only). Real conference/merge requires telecom provider
-    // support.
+    // Conference action — delegates to merged onMerge() which performs the actual Telecom operation.
     private fun onConference() {
         Log.d(
                 "CallScreenActivity",
                 "Conference action requested — canConference=${canConferenceState.value}"
         )
-
         if (!canConferenceState.value) {
-            Log.d("CallScreenActivity", "Conference not available for this call")
+            showSnackbar("Conference not available for this call")
             return
         }
-
-        try {
-            // Stub: actual conference operation would require Telecom/ConnectionService integration
-            Log.d(
-                    "CallScreenActivity",
-                    "(Stub) Performing conference operation on currentCall: $currentCall"
-            )
-        } catch (e: Exception) {
-            Log.e("CallScreenActivity", "Failed to perform conference", e)
-        }
+        // Real conference uses the same path as merge: Call.conference(holdingCall)
+        onMerge()
     }
 
     private fun onMerge() {
@@ -1194,7 +1238,16 @@ fun CallScreen(
     showKeypad: Boolean,
     onToggleKeypad: () -> Unit,
     getContactName: (String) -> String?,
-    snackbarHostState: androidx.compose.material3.SnackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+    snackbarHostState: androidx.compose.material3.SnackbarHostState = remember { androidx.compose.material3.SnackbarHostState() },
+    // TTY mode (one of TtyHelper.TTY_MODE_*)
+    ttyMode: Int = TtyHelper.TTY_MODE_OFF,
+    onSetTtyMode: (Int) -> Unit = {},
+    // VoLTE / VoWiFi badge label, null = plain GSM
+    networkBadge: String? = null,
+    // Whether this is an emergency call
+    isEmergencyCall: Boolean = false,
+    // SIM label for the active call slot, e.g. "SIM 1 – Carrier"
+    simLabel: String? = null
 ) {
     val coroutineScope = rememberCoroutineScope()
     var callState by remember(call) { mutableStateOf(initialCallState) }
@@ -1205,6 +1258,7 @@ fun CallScreen(
     var isMuted by remember { mutableStateOf(false) }
     var showAudioRouteMenu by remember { mutableStateOf(false) }
     var showSwapMenu by remember { mutableStateOf(false) }
+    var showTtyMenu by remember { mutableStateOf(false) }
     
     // Determine current audio route and available routes
     val currentRoute = audioState?.route ?: CallAudioState.ROUTE_EARPIECE
@@ -1397,7 +1451,97 @@ fun CallScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Emergency call banner
+                if (isEmergencyCall) {
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                color = Color(0xFFFF4757).copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "EMERGENCY CALL",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFFF4757)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                // VoLTE / VoWiFi / 5G badge + SIM label row
+                if (networkBadge != null || simLabel != null) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (networkBadge != null) {
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        color = Color(0xFF4A6FFF).copy(alpha = 0.2f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = networkBadge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF4A6FFF)
+                                )
+                            }
+                        }
+                        if (simLabel != null) {
+                            Text(
+                                text = simLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF8F9BB3)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                // TTY mode indicator + picker button (shown during active calls)
+                if (isActive || isOnHold) {
+                    Box {
+                        TextButton(onClick = { showTtyMenu = true }) {
+                            val ttyLabel = TtyHelper.modeName(ttyMode)
+                            Text(
+                                text = if (ttyMode == TtyHelper.TTY_MODE_OFF) "TTY: Off" else "TTY: $ttyLabel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (ttyMode == TtyHelper.TTY_MODE_OFF) Color(0xFF8F9BB3) else Color(0xFF4A6FFF)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showTtyMenu,
+                            onDismissRequest = { showTtyMenu = false },
+                            modifier = Modifier.background(Color(0xFF1A2138))
+                        ) {
+                            TtyHelper.allModes.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            TtyHelper.modeName(mode),
+                                            color = if (mode == ttyMode) Color(0xFF4A6FFF) else Color.White
+                                        )
+                                    },
+                                    onClick = {
+                                        onSetTtyMode(mode)
+                                        showTtyMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
 
                 // Call duration with pulse animation
                 if (isActive) {

@@ -12,16 +12,28 @@
     <uses-permission android:name="android.permission.READ_PRECISE_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <!-- Required by AccountManager.getAccounts() to enumerate sync accounts for contact creation -->
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
     <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Dual SIM: query phone numbers per subscription (API 30+) -->
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+
+    <!-- Emergency / privileged call placement for default dialer role -->
+    <uses-permission android:name="android.permission.CALL_PRIVILEGED"
+        tools:ignore="ProtectedPermissions" />
+
     <!-- OEM compatibility for write-call-log on older devices -->
     <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS"
         tools:ignore="Deprecated" />
     
+    <!-- SMS: send message from call-log entry actions -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+
     <!-- Android 13+ notifications runtime permission -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"
@@ -31,8 +43,75 @@
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <uses-feature android:name="android.hardware.telephony.gsm" android:required="false" />
     <uses-feature android:name="android.hardware.telephony.cdma" android:required="false" />
+    <!-- IMS features: VoLTE, VoWiFi, RTT (all optional — carrier-dependent) -->
+    <uses-feature android:name="android.hardware.telephony.ims" android:required="false" />
 
     <application>
+        <!-- Pre-Call Dialer Activity: T9 smart dial, copy/paste, speed dial (long-press 1–9) -->
+        <activity
+            android:name="com.fayyaztech.dialer_core.ui.dialer.DialerActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait">
+            <!-- Handle ACTION_DIAL with a tel: URI (standard dialer intent) -->
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tel" />
+            </intent-filter>
+            <!-- Handle bare ACTION_DIAL (no URI — opens empty dialer) -->
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Handle ACTION_VIEW with a tel: URI -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tel" />
+            </intent-filter>
+        </activity>
+
+        <!-- Call Log Activity: full call history, filter, bulk-delete -->
+        <activity
+            android:name="com.fayyaztech.dialer_core.ui.calllog.CallLogActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait">
+            <!-- Deep-link target from missed-call notification -->
+            <intent-filter>
+                <action android:name="com.fayyaztech.dialer_core.ACTION_VIEW_CALL_LOG" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Contacts Browser Activity: All / Favourites / SIM tabs, search, import -->
+        <activity
+            android:name="com.fayyaztech.dialer_core.ui.contacts.ContactsActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="com.fayyaztech.dialer_core.ACTION_VIEW_CONTACTS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Contact Detail Activity: view / edit / create a single contact; quick dial from card -->
+        <activity
+            android:name="com.fayyaztech.dialer_core.ui.contacts.ContactDetailActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:screenOrientation="portrait" />
+            <!-- Deep-link target from missed-call notification -->
+            <intent-filter>
+                <action android:name="com.fayyaztech.dialer_core.ACTION_VIEW_CALL_LOG" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <!-- In-Call Screen Activity -->
         <activity
             android:name="com.fayyaztech.dialer_core.ui.call.CallScreenActivity"
